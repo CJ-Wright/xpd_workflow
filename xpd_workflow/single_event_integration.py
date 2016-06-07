@@ -3,6 +3,7 @@ from __future__ import division, print_function
 import os
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
 import scipy.stats as sts
 from diffpy.pdfgetx import PDFGetter
 
@@ -132,15 +133,17 @@ def ring_blur_mask(img, q, alpha, bins, mask=None):
     return mask.astype(bool)
 
 
-def single_mask_integration(img, geo, alpha=(3., 3.), tmsk=None,
-                            statistics='median'):
+def single_mask_integration(img, geo, alpha=(2.5, 2.5), tmsk=None,
+                            masking=True,
+                            statistics='median',
+                            plot=True):
     # Correct for polarization
     img /= geo.polarization(img.shape, .95)
 
     r = geo.rArray(img.shape)
     q = geo.qArray(img.shape) / 10  # pyFAI works in nm**-1, we want A**-1
     bins = generate_q_bins(np.max(r) - .5 * geo.pixel1,
-                           geo.pixel1, geo.dist, geo.wavelength*10**10)
+                           geo.pixel1, geo.dist, geo.wavelength * 10 ** 10)
     # Pre masking data
     bs_kwargs = {'bins': bins,
                  # 'range': [0, fq.max()]
@@ -148,15 +151,25 @@ def single_mask_integration(img, geo, alpha=(3., 3.), tmsk=None,
 
     if tmsk is None:
         tmsk = np.ones(img.shape, dtype=int).astype(bool)
-    tmsk *= mask_edge(img.shape, 30)
-    tmsk *= ring_blur_mask(img, q, alpha, bins, mask=tmsk)
-    fig, (ax1, ax2, ax3) = plt.subplots(ncols=3, sharex=True, sharey=True)
+    if masking:
+        tmsk *= mask_edge(img.shape, 30)
+        tmsk *= ring_blur_mask(img, q, alpha, bins, mask=tmsk)
+        tmsk *= (img > 0.0).astype(bool)
+
     img2 = img.copy()
     img2[~tmsk] = 0.0
 
-    ax1.imshow(img)
-    ax2.imshow(img2)
-    ax3.imshow(~tmsk)
+    if plot:
+        for i in [img, img2, ~tmsk]:
+            fig, ax = plt.subplots()
+            if i.dtype is tmsk.dtype:
+                plt.imshow(i, aspect='auto', cmap='viridis')
+            else:
+                plt.imshow(i, aspect='auto',
+                           norm=LogNorm(vmax=.99 * np.max(i)),
+                           cmap='viridis'
+                           )
+            plt.colorbar()
 
     fmsk_img = img[tmsk]
     fmsk_q = q[tmsk]
@@ -180,7 +193,6 @@ def single_mask_integration(img, geo, alpha=(3., 3.), tmsk=None,
 
 def single_event_workflow(foreground_args,
                           background_args,
-                          temp=True,
                           post_processing=('IQ', 'PDF'),
                           dir_path=None,
                           fn_stem=None,
@@ -192,17 +204,23 @@ def single_event_workflow(foreground_args,
     (fg_img, fg_i0, fg_md, geo) = foreground_args
     (bg_img, bg_i0, bg_md, geo) = background_args
     # Mask/Integrate the foreground
-    fg_x, fg_y, _ = single_mask_integration(fg_img, geo)
+    fg_x, fg_y, fg_mask = single_mask_integration(fg_img, geo, plot=plot)
+    fg_y = fg_y[0]
     fg_y /= fg_i0 / fg_md['summedexposures']
-    # Mask/Integrate the background
-    bg_x, bg_y, _ = single_mask_integration(bg_img, geo)
-    bg_y /= bg_i0 / bg_md['summedexposures']
+
+    if background_args is not None:
+        # Mask/Integrate the background
+        bg_x, bg_y, bg_mask = single_mask_integration(bg_img, geo, tmsk=fg_mask,
+                                                      masking=False, plot=plot)
+        bg_y = bg_y[0]
+        bg_y /= bg_i0 / bg_md['summedexposures']
+    else:
+        bg_y = np.zeros(fg_y.shape)
     # Subtract the background
     bg_subed_y = fg_y - bg_y
 
     # PDFgetx3
     if 'PDF' in post_processing and np.max(fg_x) >= 25.:
-        z = PDFGetter()
         if pdf_dict is None:
             pdf_dict = [{'qmin': 1.5,
                          'qmax': 25., 'qmaxinst': 25.,
@@ -213,6 +231,7 @@ def single_event_workflow(foreground_args,
         elif not isinstance(pdf_dict, (tuple, list)):
             pdf_dict = [pdf_dict]
         for pd in pdf_dict:
+            z = PDFGetter()
             r, gr = z(fg_x, bg_subed_y, **pd)
             rgr = np.vstack((r, gr)).T
             qfq = np.vstack(z.fq).T
@@ -227,30 +246,42 @@ def single_event_workflow(foreground_args,
                 for data, end in zip([rgr, qfq], ['gr', 'fq']):
                     np.savetxt(os.path.join(dir_path,
                                             '{}.{}'.format(fn_stem, end)), rgr)
-            save_output(fg_x, bg_subed_y, fn_stem, q_or_2theta='Q',
-                        dir_path=dir_path)
+                save_output(fg_x, bg_subed_y, fn_stem, q_or_2theta='Q',
+                            dir_path=dir_path)
 
     if 'IQ' in post_processing and fn_stem is not None and dir_path is not None and save:
         save_output(fg_x, bg_subed_y, fn_stem, q_or_2theta='Q',
                     dir_path=dir_path)
-    plt.show()
+    if plot:
+        plt.show()
     return
+
 
 if __name__ == '__main__':
     plt.style.use('/mnt/bulk-data/Masters_Thesis/config/thesis.mplstyle')
 
     from pyFAI import load
     from pims import TiffStack
-    base = '/mnt/bulk-data/Dropbox/BNL_Project/misc/CGO_summed/CGO_summed'
-    # geo = Geometry()
-    geo = load(os.path.join(base, 'Ni_stnd', 'Ni_STD_60s-00004.poni'))
-    # Geometry.load(os.path.join(base, 'ni_std', 'Ni_STD_60s-00004.poni'))
-    img = TiffStack(os.path.join(base, 'Sample1_350um', 'Sample_1_CGO_4_0_19_summed.tif'))[0]
 
-    x, int_sts,(mask) = single_mask_integration(img, geo, statistics=('mean', 'median', np.std), alpha=(3, 3))
+    base = '/mnt/bulk-data/Dropbox/BNL_Project/mask_paper/raw_data/'
+    # geo = Geometry()
+    geo = load(os.path.join(base, 'Ni_NIST_STD-00003.poni'))
+    # Geometry.load(os.path.join(base, 'ni_std', 'Ni_STD_60s-00004.poni'))
+    img = TiffStack(os.path.join(base, 'Ni_NIST_STD-00003.tif'))[0]
+
+    x, int_sts, (mask) = single_mask_integration(
+        img,
+        geo,
+        statistics=('mean', 'median', np.std),
+        alpha=(2., 2.)
+    )
     fig, ax = plt.subplots()
     ax.plot(x, int_sts[0])
     ax.plot(x, int_sts[1])
+
     fig, ax = plt.subplots()
-    ax.plot(x, int_sts[2]/int_sts[1])
+    ax.plot(x, int_sts[1] - int_sts[0])
+
+    fig, ax = plt.subplots()
+    ax.plot(x, int_sts[2] / int_sts[1])
     plt.show()

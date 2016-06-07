@@ -172,7 +172,7 @@ def main(plot=True, super_plot=False):
                       'qmax': 34., 'qmaxinst': 34.,
                       'rpoly': .9,
                       'rmax': 40.,
-                      'composition': 'Pr2NiO4', 'dataformat': 'Qnm',
+                      'composition': 'Pr2NiO4', 'dataformat': 'QA',
                       }
 
                 r, gr = z(x, bg_sub_y, **d1)
