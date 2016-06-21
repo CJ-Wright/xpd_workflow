@@ -39,7 +39,7 @@ pdf_dict_list = [
 def main(plot=True, super_plot=False):
     # Get headers of interest
     hdrs = db(
-        run_folder='/mnt/bulk-data/research_data/USC_beamtime/APS_March_2016/S1/temp_exp'
+        # run_folder='/mnt/bulk-data/research_data/USC_beamtime/APS_March_2016/S1/temp_exp'
         # is_calibration=False
         # is_calibration=True
     )
