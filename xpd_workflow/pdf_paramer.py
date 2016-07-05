@@ -4,32 +4,67 @@ Use is subject to license terms and conditions.
 @author: Christopher J. Wright'''
 __author__ = 'Christopher J. Wright'
 
-
 import matplotlib.pyplot as plt
 import os
 import scipy.signal as signal
 from diffpy.pdfgetx import PDFGetter, loadData
 import numpy as np
 
-fg_x, bg_subed_y = loadData('/media/christopher/5TB_Backup/deepthought/bulk-data/research_data/USC_beamtime/APS_March_2016/S1/temp_exp/00001.chi', unpack=True)
+cvk = 3
+# for cvk in range(1, 6):
+
+fg_x, bg_subed_y = loadData(
+    '/media/christopher/5TB_Backup/deepthought/bulk-data/research_data/USC_beamtime/APS_March_2016/S1/temp_exp/00000.chi',
+    unpack=True)
+# fg_x, bg_subed_y = loadData('/media/christopher/5TB_Backup/deepthought/bulk-data/research_data/USC_beamtime/APS_March_2016/S1/temp_exp/d25_S6_VT-00000.chi', unpack=True)
+# fg_x /= 10
 pd = {'qmin': 1.5,
-             'qmax': 25., 'qmaxinst': 25.,
-             'rpoly': .9,
-             'rmax': 40.,
-             'composition': 'Pr2NiO4', 'dataformat': 'QA',
-             }
-a = np.arange(25, 35,  .1)
-ripple_aray = np.zeros((len(a), len(a)))
+      'qmax': 26., 'qmaxinst': 35.,
+      'rpoly': .9,
+      'rmax': 40.,
+      'composition': 'Pr2NiO4', 'dataformat': 'QA',
+      }
+z = PDFGetter()
+a = np.arange(25, fg_x[-1], .05)
+ripple_array = np.zeros((len(a), len(a)))
+ripple_list = []
+print(ripple_array.size)
+'''
+for i in a:
+    pd['qmax'] = i
+    print(i)
+    pd['rstep'] = np.pi/pd['qmax']
+    r, gr = z(fg_x, bg_subed_y, **pd)
+    w = gr - np.convolve(gr, np.ones(3) / 3, 'same')
+    ripple_sum = np.sum(abs(w))
+    ripple_list.append(ripple_sum)
+plt.plot(a, ripple_list)
+plt.show()
+AAA
+# '''
 for ei, i in enumerate(a):
     for ej, j in enumerate(a):
         if i <= j:
             pd['qmaxinst'] = j
             pd['qmax'] = i
-            z = PDFGetter()
+            pd['rstep'] = np.pi / pd['qmax']
             r, gr = z(fg_x, bg_subed_y, **pd)
-            w = gr - np.convolve(gr, np.ones(3)/3, 'same')
+            w = gr - np.convolve(gr, np.ones(cvk) / cvk, 'same')
             ripple_sum = np.sum(abs(w))
-            ripple_aray[ei, ej] = ripple_sum
-plt.imshow(ripple_aray, cmap='viridis')
+            ripple_array[ei, ej] = ripple_sum
+        else:
+            ripple_array[ei, ej] = np.nan
+plt.imshow(ripple_array, cmap='viridis', interpolation='none', extent=[a[0], a[-1], a[0], a[-1]], origin='lower left',
+           vmax=1.1 * np.nanmin(ripple_array), aspect='auto')
 plt.colorbar()
+plt.xlabel('Qmaxinst')
+plt.ylabel('Qmax')
+b1, b2 = np.unravel_index(np.nanargmin(ripple_array), ripple_array.shape)
+print(a[b1], a[b2], np.nanmin(ripple_array))
+plt.show()
+pd['qmax'] = a[b1]
+pd['qmaxinst'] = a[b2]
+pd['rstep'] = .01
+r, gr = z(fg_x, bg_subed_y, **pd)
+plt.plot(r, gr)
 plt.show()
