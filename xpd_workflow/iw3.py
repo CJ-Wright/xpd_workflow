@@ -126,7 +126,7 @@ def single_mask_integration(img, geo,
 
     r = geo.rArray(img.shape)
     pixel_size = [getattr(geo, a) for a in ['pixel1', 'pixel2']]
-    rres = np.sqrt(np.sum([a ** 2 for a in pixel_size]))
+    rres = np.hypot(*pixel_size)
     rbins = np.arange(np.min(r) - rres / 2., np.max(r) + rres / 2., rres)
 
     # Pre masking data
@@ -210,6 +210,7 @@ def get_background(event, match_keys=None, bg_hdr_idx=-1):
     event:
         The background event most suited to the foreground event
     """
+    # Or pull this out of amostra
     bg_uid = event['descriptor']['run_start']['background_uid']
     bg_hdr = db(background_uid=bg_uid, is_background=True)[bg_hdr_idx]
     # Match up the foreground event with the background
