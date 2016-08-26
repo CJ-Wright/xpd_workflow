@@ -7,10 +7,17 @@ from skbeam.core.mask import margin_mask, ring_blur_mask
 from itertools import islice
 from diffpy.pdfgetx import PDFGetter
 import pyFAI
+import subprocess as sp
 
 # workflow for x-ray scattering
 default_pdf_params = {'qmin': 0.0, 'qmax': 25., 'qmaxinst': 30, 'rpoly': .9}
 
+
+def run_calibration(event, dark_hdr_idx=-1, img_key='pe1_image'):
+    img = subs_dark(event, dark_hdr_idx, img_key)
+    # Save image somewhere
+    # Change directory to pyFAI save/analysis dir
+    sp.run(['pyFAI-calib', ])
 
 # 1. associate with a calibration
 def get_calibration(event, cal_hdr_idx=-1, cal_file=None):
@@ -67,7 +74,7 @@ def subs_dark(event, dark_hdr_idx=-1, img_key='pe1_image'):
     dark_events = get_events(dark_hdr, fill=True)
     # TODO: allow for indexing of the data so we can get back different darks
     dark_img = next(dark_events)['data'][img_key]
-    return dark_img
+    return event['dat'][img_key] - dark_img
 
 
 # 2b. - 5. process to I(Q)
@@ -164,7 +171,8 @@ def single_mask_integration(img, geo,
     return bin_edges_to_centers(qbins), integrated_statistics, tmsk
 
 
-def process_to_iq(event, img_key='pe1_image',archived_analysis=False, **kwargs):
+def process_to_iq(event, img_key='pe1_image', dark_hdr_idx=-1,
+                  archived_analysis=False, **kwargs):
     """
     Process an event to I(Q)
 
@@ -187,6 +195,7 @@ def process_to_iq(event, img_key='pe1_image',archived_analysis=False, **kwargs):
         pass
     else:
         geo = get_calibration(event=event)
+        img = subs_dark(event, dark_hdr_idx, img_key)
         q, iq, msk = single_mask_integration(event['data'][img_key], geo, **kwargs)
     return q, iq, msk
 
