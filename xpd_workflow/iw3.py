@@ -7,17 +7,59 @@ from skbeam.core.mask import margin_mask, ring_blur_mask
 from itertools import islice
 from diffpy.pdfgetx import PDFGetter
 import pyFAI
-import subprocess as sp
+from skbeam.core.utils import q_to_twotheta
+import subprocess as sbp
+from filestore import commands as fsc
+from tifffile import imsave
+from analysisstore.client.commands import AnalysisClient
+import time
+from uuid import uuid4
 
+conf = dict(host='xf28id-ca1.cs.nsls2.local', port=7767)
+conn = AnalysisClient(conf)
 # workflow for x-ray scattering
 default_pdf_params = {'qmin': 0.0, 'qmax': 25., 'qmaxinst': 30, 'rpoly': .9}
 
 
-def run_calibration(event, dark_hdr_idx=-1, img_key='pe1_image'):
+# 0. do calibration
+def run_calibration(event, detector='Perkin', w_or_e, w_or_e_val):
+    # TODO: get wavelength or energy from a wavelength/energy calibration
+    function_kwargs = locals()
+    del function_kwargs['event']
+
     img = subs_dark(event, dark_hdr_idx, img_key)
-    # Save image somewhere
-    # Change directory to pyFAI save/analysis dir
-    sp.run(['pyFAI-calib', ])
+    # Put image on disk as a tiff somewhere
+    imsave('{}_{}_dk_subs.tif'.format(event['descriptor']['run_start']['uid']),
+           event['seq_num'])
+    # change dirs to analysis dir
+    sbp.run(['pyFAI-calib', '-D {} -{} {} -c {} {}'.format(
+        detector, w_or_e, w_or_e_val, calibration_file, image_file
+    )])
+    # add files to filestore
+    # add entry to analysisstore
+    md = dict(run_header_uid=event['descriptor']['run_start_header']['uid'],
+              seq_num=event['seq_num]'],
+              event_uid=event['uid'],
+              function='run_calibration',
+              function_kwargs=function_kwargs)
+    a_hdr_uid = conn.insert_analysis_header(time=time.time(), uid=str(uuid4()),
+                                            provenance=prov_kwargs,
+                                            **md)
+    data_keys = {'poni': dict(source='pyFAI-calib', external='FILESTORE:',
+                              dtype='dict')}
+
+    data_hdr = dict(analysis_header=a_hdr_uid, data_keys=data_keys,
+                    time=time.time(), uid=str(uuid4()))
+    data_hdr_uid = conn.insert_data_reference_header(**data_hdr)
+    data_ref_uid = conn.insert_data_reference(data_hdr, uid=str(uuid4()),
+                                              time=time.time(),
+                                              data={'poni': ''},
+                                              timestamps={})
+    conn.insert_analysis_tail(analysis_header=a_hdr_uid, uid=str(uuid4()),
+                              time=time.time(), exit_status='success')
+    geo = fsc.retrieve()
+    return geo
+
 
 # 1. associate with a calibration
 def get_calibration(event, cal_hdr_idx=-1, cal_file=None):
@@ -44,6 +86,14 @@ def get_calibration(event, cal_hdr_idx=-1, cal_file=None):
     cal_uid = event['descriptor']['run_start']['calibration_uid']
     cal_hdr = db(calibration_uid=cal_uid, is_calibration=True)[cal_hdr_idx]
     # Get geo from analysisstore associated with cal_hdr
+    a_hdrs = conn.find_analysis_header(run_header_uid=cal_hdr)
+    if not a_hdrs:
+        run_calibration(event, *args)
+    else:
+        dref_hdr = conn.find_data_reference_header(analysis_header=a_hdrs[0])
+        # check if calibration exit_status good
+        calib_evs = conn.find_data_reference(data_reference_header=dref_hdr)
+        # Filestore magic on events goes here
     geo = 1
     return geo
 
@@ -74,7 +124,7 @@ def subs_dark(event, dark_hdr_idx=-1, img_key='pe1_image'):
     dark_events = get_events(dark_hdr, fill=True)
     # TODO: allow for indexing of the data so we can get back different darks
     dark_img = next(dark_events)['data'][img_key]
-    return event['dat'][img_key] - dark_img
+    return event['data'][img_key] - dark_img
 
 
 # 2b. - 5. process to I(Q)
@@ -171,7 +221,7 @@ def single_mask_integration(img, geo,
     return bin_edges_to_centers(qbins), integrated_statistics, tmsk
 
 
-def process_to_iq(event, img_key='pe1_image', dark_hdr_idx=-1,
+def process_to_iq(event, img_key='pe1_image',
                   archived_analysis=False, **kwargs):
     """
     Process an event to I(Q)
@@ -195,9 +245,11 @@ def process_to_iq(event, img_key='pe1_image', dark_hdr_idx=-1,
         pass
     else:
         geo = get_calibration(event=event)
-        img = subs_dark(event, dark_hdr_idx, img_key)
-        q, iq, msk = single_mask_integration(event['data'][img_key], geo, **kwargs)
-    return q, iq, msk
+        q, iq, msk = single_mask_integration(event['data'][img_key], geo,
+                                             **kwargs)
+    tth = q_to_twotheta(q, geo.wavelength)
+    # save everything to filestore
+    return q, iq, tth, msk
 
 
 def get_background(event, match_keys=None, bg_hdr_idx=-1):

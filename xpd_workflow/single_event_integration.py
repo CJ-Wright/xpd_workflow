@@ -7,7 +7,6 @@ from matplotlib.colors import LogNorm
 import scipy.stats as sts
 from diffpy.pdfgetx import PDFGetter
 
-from sidewinder_spec.utils.handlers import *
 from skbeam.diffraction import bin_edges_to_centers
 from skbeam.io.save_powder_output import save_output
 from skbeam.core.utils import twotheta_to_q
