@@ -22,7 +22,8 @@ default_pdf_params = {'qmin': 0.0, 'qmax': 25., 'qmaxinst': 30, 'rpoly': .9}
 
 
 # 0. do calibration
-def run_calibration(event, detector, w_or_e, w_or_e_val):
+def run_calibration(event, detector='Perkin', w_or_e, w_or_e_val):
+    # TODO: get wavelength or energy from a wavelength/energy calibration
     function_kwargs = locals()
     del function_kwargs['event']
 
