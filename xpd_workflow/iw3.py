@@ -14,29 +14,79 @@ from tifffile import imsave
 from analysisstore.client.commands import AnalysisClient
 import time
 from uuid import uuid4
+import os
 
 conf = dict(host='xf28id-ca1.cs.nsls2.local', port=7767)
 conn = AnalysisClient(conf)
 # workflow for x-ray scattering
 default_pdf_params = {'qmin': 0.0, 'qmax': 25., 'qmaxinst': 30, 'rpoly': .9}
 
+analysis_save_loc = '/nfs/someplace'
+
+
+def run_energy_calibration(event):
+    """
+    Perform energy calibration for an energy calibration event
+
+    Parameters
+    ----------
+    event
+
+    Returns
+    -------
+
+    """
+    pass
 
 # 0. do calibration
-def run_calibration(event, detector='Perkin', w_or_e, w_or_e_val):
+def run_detector_calibration(event):
+    """
+    Create a detector calibration from a calibration event
+
+    Parameters
+    ----------
+    event:
+        The calibration event
+
+    Returns
+    -------
+    geo: pyFAI.Geometry
+        The pyFAI Geometry for the detector
+    """
     # TODO: get wavelength or energy from a wavelength/energy calibration
+    # TODO: get detector name from MDS
+    # TODO: get calibration file from amostra
+
     function_kwargs = locals()
     del function_kwargs['event']
 
     img = subs_dark(event, dark_hdr_idx, img_key)
+
     # Put image on disk as a tiff somewhere
-    imsave('{}_{}_dk_subs.tif'.format(event['descriptor']['run_start']['uid']),
-           event['seq_num'])
+    image_filename = os.path.join(
+        analysis_save_loc,
+        '{}_{}_dk_subs'.format(event['descriptor']['run_start']['uid']),
+        event['seq_num'])
+    image_file = image_filename + '.tif'
+    imsave(image_file, img)
+
     # change dirs to analysis dir
+    os.chdir(analysis_save_loc)
+
+    # Run pyFAI calibration routine
     sbp.run(['pyFAI-calib', '-D {} -{} {} -c {} {}'.format(
         detector, w_or_e, w_or_e_val, calibration_file, image_file
     )])
+
+    # TODO: capture all the files
+    file_dict = {k:str(uuid4()) for k in ['poni']}
     # add files to filestore
+    for file_ext, uid in file_dict:
+        fs_res = fsc.insert_resource('PONI', image_filename+'.'+file_ext)
+        fsc.insert_datum(fs_res, uid)
+
     # add entry to analysisstore
+    # TODO: make a function to do all this formatting
     md = dict(run_header_uid=event['descriptor']['run_start_header']['uid'],
               seq_num=event['seq_num]'],
               event_uid=event['uid'],
@@ -45,24 +95,27 @@ def run_calibration(event, detector='Perkin', w_or_e, w_or_e_val):
     a_hdr_uid = conn.insert_analysis_header(time=time.time(), uid=str(uuid4()),
                                             provenance=prov_kwargs,
                                             **md)
+
     data_keys = {'poni': dict(source='pyFAI-calib', external='FILESTORE:',
                               dtype='dict')}
-
     data_hdr = dict(analysis_header=a_hdr_uid, data_keys=data_keys,
                     time=time.time(), uid=str(uuid4()))
+
     data_hdr_uid = conn.insert_data_reference_header(**data_hdr)
+
     data_ref_uid = conn.insert_data_reference(data_hdr, uid=str(uuid4()),
                                               time=time.time(),
-                                              data={'poni': ''},
+                                              data={'poni': file_dict['poni']},
                                               timestamps={})
+
     conn.insert_analysis_tail(analysis_header=a_hdr_uid, uid=str(uuid4()),
                               time=time.time(), exit_status='success')
-    geo = fsc.retrieve()
+    geo = fsc.retrieve(file_dict['poni'])
     return geo
 
 
 # 1. associate with a calibration
-def get_calibration(event, cal_hdr_idx=-1, cal_file=None):
+def get_calibration(event, cal_hdr_idx=-1, cal_file=None, analysis_hdr_idx=-1):
     """
     Get calibration file out of analysisstore
     Parameters
@@ -85,16 +138,21 @@ def get_calibration(event, cal_hdr_idx=-1, cal_file=None):
         return pyFAI.load(cal_file)
     cal_uid = event['descriptor']['run_start']['calibration_uid']
     cal_hdr = db(calibration_uid=cal_uid, is_calibration=True)[cal_hdr_idx]
+
     # Get geo from analysisstore associated with cal_hdr
     a_hdrs = conn.find_analysis_header(run_header_uid=cal_hdr)
     if not a_hdrs:
-        run_calibration(event, *args)
+        geo = run_detector_calibration(event)
     else:
-        dref_hdr = conn.find_data_reference_header(analysis_header=a_hdrs[0])
-        # check if calibration exit_status good
-        calib_evs = conn.find_data_reference(data_reference_header=dref_hdr)
-        # Filestore magic on events goes here
-    geo = 1
+        a_hdr = a_hdrs[analysis_hdr_idx]
+        dref_hdr = conn.find_data_reference_header(analysis_header=a_hdr)
+        as_tail_hdr = conn.find_analysis_tail(analysis_header=a_hdr)
+        if as_tail_hdr['exit_staus'] != 'success':
+            geo = run_detector_calibration(event)
+        else:
+            calib_evs = conn.find_data_reference(data_reference_header=dref_hdr)
+            # Filestore magic on events goes here
+            geo = fsc.retrieve(calib_evs['data']['poni'])
     return geo
 
 
@@ -124,7 +182,13 @@ def subs_dark(event, dark_hdr_idx=-1, img_key='pe1_image'):
     dark_events = get_events(dark_hdr, fill=True)
     # TODO: allow for indexing of the data so we can get back different darks
     dark_img = next(dark_events)['data'][img_key]
-    return event['data'][img_key] - dark_img
+    img = event['data'][img_key] - dark_img
+    # Save and enter into analysisstore
+    image_filename = os.path.join(
+        analysis_save_loc,
+        '{}_{}_dk_subs'.format(event['descriptor']['run_start']['uid']),
+        event['seq_num'])
+    return img
 
 
 # 2b. - 5. process to I(Q)
