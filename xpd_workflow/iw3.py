@@ -21,16 +21,18 @@ conn = AnalysisClient(conf)
 # workflow for x-ray scattering
 default_pdf_params = {'qmin': 0.0, 'qmax': 25., 'qmaxinst': 30, 'rpoly': .9}
 
+det_name_map = {'pe1': 'Perkin'}
+
 analysis_save_loc = '/nfs/someplace'
 
 
-def run_energy_calibration(event):
+def run_energy_calibration(run_start_header):
     """
     Perform energy calibration for an energy calibration event
 
     Parameters
     ----------
-    event
+    run_start_header
 
     Returns
     -------
@@ -38,14 +40,15 @@ def run_energy_calibration(event):
     """
     pass
 
+
 # 0. do calibration
-def run_detector_calibration(event):
+def run_detector_calibration(run_start_header):
     """
-    Create a detector calibration from a calibration event
+    Create a detector calibration from a calibration header
 
     Parameters
     ----------
-    event:
+    run_start_header:
         The calibration event
 
     Returns
@@ -58,20 +61,32 @@ def run_detector_calibration(event):
     # TODO: get calibration file from amostra
 
     function_kwargs = locals()
-    del function_kwargs['event']
+    del function_kwargs['run_start_header']
 
-    img = subs_dark(event, dark_hdr_idx, img_key)
+    img = subs_dark(run_start_header, dark_hdr_idx, img_key)
 
     # Put image on disk as a tiff somewhere
     image_filename = os.path.join(
         analysis_save_loc,
-        '{}_{}_dk_subs'.format(event['descriptor']['run_start']['uid']),
-        event['seq_num'])
+        '{}_{}_dk_subs'.format(
+            run_start_header['descriptor']['run_start']['uid']),
+        run_start_header['seq_num'])
     image_file = image_filename + '.tif'
     imsave(image_file, img)
 
     # change dirs to analysis dir
     os.chdir(analysis_save_loc)
+
+    # Get the detector name from the map
+    detector = det_name_map[]
+
+    # TODO: pull the energy from the energy calibration
+    energy_calibration_uid = run_start_header['start'][
+        'energy_calibration_uid']
+    energy_hdr = db(energy_uid=energy_calibration_uid,
+                    is_energy_calibration=True)
+    a_hdrs = conn.find_analysis_header(
+        run_header_uid=energy_hdr['start']['uid'])
 
     # Run pyFAI calibration routine
     sbp.run(['pyFAI-calib', '-D {} -{} {} -c {} {}'.format(
@@ -87,11 +102,63 @@ def run_detector_calibration(event):
 
     # add entry to analysisstore
     # TODO: make a function to do all this formatting
-    md = dict(run_header_uid=event['descriptor']['run_start_header']['uid'],
-              seq_num=event['seq_num]'],
-              event_uid=event['uid'],
-              function='run_calibration',
-              function_kwargs=function_kwargs)
+    md = dict(
+        run_header_uid=run_start_header['descriptor']['run_start_header'][
+            'uid'],
+        seq_num=run_start_header['seq_num]'],
+        event_uid=run_start_header['uid'],
+        function='run_calibration',
+        function_kwargs=function_kwargs)
+    a_hdr_uid = conn.insert_analysis_header(time=time.time(), uid=str(uuid4()),
+                                            provenance=prov_kwargs,
+                                            **md)
+
+    # TODO: maybe use the dictionary itself?
+    data_keys = {'poni': dict(source='pyFAI-calib', external='FILESTORE:',
+                              dtype='dict')}
+    data_hdr = dict(analysis_header=a_hdr_uid, data_keys=data_keys,
+                    time=time.time(), uid=str(uuid4()))
+
+    data_hdr_uid = conn.insert_data_reference_header(**data_hdr)
+
+    data_ref_uid = conn.insert_data_reference(data_hdr, uid=str(uuid4()),
+                                              time=time.time(),
+                                              data={'poni': file_dict['poni']},
+                                              timestamps={})
+
+    conn.insert_analysis_tail(analysis_header=a_hdr_uid, uid=str(uuid4()),
+                              time=time.time(), exit_status='success')
+    geo = fsc.retrieve(file_dict['poni'])
+    return geo
+
+
+def spoof_detector_calibration(run_start_header, poni_file):
+    """
+    Insert a detector calibration from a poni file
+
+    Parameters
+    ----------
+    poni_file
+
+    Returns
+    -------
+
+    """
+    file_dict = {k: str(uuid4()) for k in ['poni']}
+    # add files to filestore
+    for file_ext, uid in file_dict:
+        fs_res = fsc.insert_resource('PONI', poni_file)
+        fsc.insert_datum(fs_res, uid)
+
+    # add entry to analysisstore
+    # TODO: make a function to do all this formatting
+    md = dict(
+        run_header_uid=run_start_header['descriptor']['run_start_header'][
+            'uid'],
+        seq_num=run_start_header['seq_num]'],
+        event_uid=run_start_header['uid'],
+        function='run_calibration',
+        )
     a_hdr_uid = conn.insert_analysis_header(time=time.time(), uid=str(uuid4()),
                                             provenance=prov_kwargs,
                                             **md)
@@ -112,7 +179,6 @@ def run_detector_calibration(event):
                               time=time.time(), exit_status='success')
     geo = fsc.retrieve(file_dict['poni'])
     return geo
-
 
 # 1. associate with a calibration
 def get_calibration(event, cal_hdr_idx=-1, cal_file=None, analysis_hdr_idx=-1):
