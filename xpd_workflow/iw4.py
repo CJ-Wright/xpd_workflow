@@ -1,4 +1,4 @@
-from databroker import db, get_events
+from databroker import db, get_events, get_table
 from analysisstore.client.commands import AnalysisClient
 import filestore.commands as fsc
 from itertools import islice
@@ -36,45 +36,88 @@ def get_analysis_events(hdr, fill=False):
         yield event
 
 
-def process_to_pdf(hdr):
+def process_to_iq(hdr):
     # 1. get a detector calibration
-    geo = get_from_analysisstore(hdr, function_name='run_calibration',
+    geo = get_from_analysisstore(hdr,
+                                 function_name='run_calibration',
                                  run_function=calibrate_detector,
                                  data_names='poni',
                                  uid_name='detector_calibration_uid')
-    # 1a. associate background
-    # 2. subtract dark image
-    imgs = get_from_analysisstore(hdr, run_dark_subtraction, 'img', 'dark_uid')
+    imgs = analysis_run_engine(hdr, subs_dark, 'subs_dark')
     # 3. polarization correction
-    corrected_imgs = run_and_insert(hdr, polarization_correction,
-                                    'img', 'dark_uid', geo=geo)
+    corrected_imgs = analysis_run_engine([imgs, geo], polarization_correction,
+                                         'polarization_correction')
     # 4. mask
-    masks = run_and_insert(hdr, mask_img, 'mask_img')
+    masks = analysis_run_engine([corrected_imgs, geo], mask_img, 'mask_img')
     # 5. integrate
-    iqs = run_and_insert(hdr, integrate, 'integrate')
-    # 6. get background
-    bgd_iqs = get_background_data(hdr)
+    iqs = analysis_run_engine([imgs, masks, geo], integrate, 'integrate')
+    return iqs
+
+
+def process_to_pdf(hdr, bg_hdr_idx=-1):
+    iqs = process_to_iq()
+    bg_hdrs = db(is_background=True, background_uid=hdr['background_uid'])
+    bg_hdr = bg_hdrs[bg_hdr_idx]
+    bg_iq = find_an_hdr(bg_hdr['uid'])
+    if not bg_iq:
+        process_to_iq(bg_hdr)
+
+    # 6a. associate background
+    associated_bg_hdr = analysis_run_engine([hdr, iqs, bg_hdr, bg_iq],
+                                            associate_background,
+                                            'associate_background')
     # 7. subtract background
-    corrected_iqs = get_background_corrected_iqs(hdr)
+    corrected_iqs = analysis_run_engine(associated_bg_hdr,
+                                        background_subtraction,
+                                        'background_subtraction')
     # 8., 9. optimize PDF params, get PDF
     pdf = get_optimized_pdf_params(hdr)
     # 10. Profit
+    return pdf
+
+
+def find_an_hdr(uid, function_name):
+    # Search analysisstore for data which is descended from the uid and who's
+    # analysis was produced by the function
+    while True:
+        for uid in uids:
+            uids = conn.find_analysis_header()
     pass
 
 
-def run_and_insert(hdrs, run_function, function_name, md=None, **kwargs):
+def analysis_run_engine(hdrs, run_function, function_name, md=None, **kwargs):
+    """
+    Properly run an analysis function on a group of headers while recording
+    the data into analysisstore
+
+    Parameters
+    ----------
+    hdrs: list of MDS headers or a MDS header
+        The headers or header to be analyzed, note that the headers are each
+        used in the analysis, if you wish to run multiple headers through a
+        pipeline you must
+    run_function
+    function_name
+    md
+    kwargs
+
+    Returns
+    -------
+
+    """
     # write analysisstore header
     analysis_hdr_uid = conn.insert_analysis_header(
         uid=str(uuid4()),
         time=time.time(),
-        provenance={'function_name': function_name},
+        provenance={'function_name': function_name,
+                    'hdr_uids': [hdr['uid'] for hdr in hdrs]},
         **md)
 
     data_hdr = None
     exit_status = 'failure'
     # run the analysis function
     try:
-        rf = run_function(hdrs, **kwargs)
+        rf = run_function(*hdrs, **kwargs)
         for i, res, data_names, data_keys in enumerate(rf):
             if not data_hdr:
                 data_hdr = dict(analysis_header=analysis_hdr_uid,
@@ -115,7 +158,33 @@ def sample_analysis_function(hdr, **kwargs):
         yield res, data_names, data_keys
 
 
-def mask_img(hdr, geo, alpha=2.5, lower_thresh=0.0, upper_thresh=None,
+def subs_dark(hdr, dark_hdr_idx=-1, dark_event_idx=-1):
+    data_keys = {'img': dict(
+        source='subs_dark',
+        external='FILESTORE:',
+        dtype='array'
+    )}
+
+    data_names = ['img']
+    dark_hdr = db(is_dark_img=True, dark_uid=hdr['dark_uid'])[dark_hdr_idx]
+    dark_events = get_events(dark_hdr, fill=True)
+    dark_img = islice(dark_events, dark_event_idx)
+    for event in get_analysis_events(hdr, fill=True):
+        light_img = event['data']['img']
+        img = light_img - dark_img
+        # save
+        # Eventually save this as a sparse array to save space
+        imsave('file_loc', img)
+
+        # insert into filestore
+        uid = str(uuid4())
+        fs_res = fsc.insert_resource('TIFF', 'file_loc')
+        fsc.insert_datum(fs_res, uid)
+        yield uid, data_names, data_keys
+
+
+def mask_img(hdr, cal_hdr,
+             alpha=2.5, lower_thresh=0.0, upper_thresh=None,
              margin=30., tmsk=None):
     data_keys = {'msk': dict(
         source='auto_mask',
@@ -124,6 +193,7 @@ def mask_img(hdr, geo, alpha=2.5, lower_thresh=0.0, upper_thresh=None,
     )}
 
     data_names = ['msk']
+    geo = next(get_analysis_events(cal_hdr, fill=True))['data']['poni']
     for event in get_analysis_events(hdr, fill=True):
         img = event['data']['img']
         r = geo.rArray(img.shape)
@@ -151,7 +221,7 @@ def mask_img(hdr, geo, alpha=2.5, lower_thresh=0.0, upper_thresh=None,
         yield uid, data_names, data_keys
 
 
-def polarization_correction(hdr, geo, polarization=.99):
+def polarization_correction(hdr, cal_hdr, polarization=.99):
     data_keys = {'img': dict(
         source='pyFAI-polarization',
         external='FILESTORE:',
@@ -159,6 +229,7 @@ def polarization_correction(hdr, geo, polarization=.99):
     )}
 
     data_names = ['img']
+    geo = next(get_analysis_events(cal_hdr, fill=True))['data']['poni']
     for event in get_analysis_events(hdr, fill=True):
         img = event['data']['img']
         img /= geo.polarization(img.shape, polarization)
@@ -172,7 +243,7 @@ def polarization_correction(hdr, geo, polarization=.99):
         yield uid, data_names, data_keys
 
 
-def integrate(img_hdr, mask_hdr, geo, stats='mean', npt=1500):
+def integrate(img_hdr, mask_hdr, cal_hdr, stats='mean', npt=1500):
     if not isinstance(stats, list):
         stats = [stats]
     for stat in stats:
@@ -182,7 +253,7 @@ def integrate(img_hdr, mask_hdr, geo, stats='mean', npt=1500):
             dtype='array'
         )}
         data_names = ['iq_{}'.format(stat)]
-
+    geo = next(get_analysis_events(cal_hdr, fill=True))['data']['poni']
     for img_event, mask_event in zip(get_analysis_events(img_hdr, fill=True),
                                      get_analysis_events(mask_hdr, fill=True)):
         mask = mask_event['data']['msk']
@@ -197,10 +268,64 @@ def integrate(img_hdr, mask_hdr, geo, stats='mean', npt=1500):
 
             # insert into filestore
             uid = str(uuid4())
-            fs_res = fsc.insert_resource('TIFF', 'file_loc')
+            fs_res = fsc.insert_resource('CHI', 'file_loc')
             fsc.insert_datum(fs_res, uid)
             uids.append(uid)
         yield uids, data_names, data_keys
+
+
+def associate_background(hdr, iqs, bg_hdr, bg_iq, match_key=None):
+    data_names = ['foreground_iq', 'background_iq']
+    data_keys = {k: dict(
+        source='associate_background',
+        external='FILESTORE:',
+        dtype='array'
+    ) for k in data_names}
+
+    # mux the background data with the foreground data
+    # TODO: get more complex, handle multiple match keys with a cost function
+    bg_iq_events = get_analysis_events(bg_iq)
+    if match_key is not None:
+        table = get_table(bg_hdr, fields=match_key)
+        for event, iq in zip(get_events(hdr), get_analysis_events(iqs)):
+            bg_event_idx = np.argmin(
+                np.abs(event[match_key] - table[match_key]))
+            bg_event = next(islice(bg_iq_events, bg_event_idx))
+            # TODO: support multiple iqs
+            yield [iq['data']['iq_mean'], bg_event['data']['iq_mean']], \
+                  data_names, data_keys
+
+
+def background_subtraction(hdr, bg_scale=1):
+    data_names = ['iq']
+    data_keys = {k: dict(
+        source='background_subtraction',
+        external='FILESTORE:',
+        dtype='array'
+    ) for k in data_names}
+
+    ran_manual = False
+
+    for event in get_analysis_events(hdr, fill=True):
+        fg_iq, bg_iq = [event['data'][k] for k in
+                        ['foreground_iq', 'background_iq']]
+        if bg_scale == 'auto':
+            raise NotImplementedError(
+                'There is no automatic background scaling,yet')
+        if not ran_manual and bg_scale == 'manual':
+            raise NotImplementedError('WE have not implemented slider bar'
+                                      'based manual background scaling, yet')
+        corrected_iq = fg_iq[1] - bg_iq[1] * bg_scale
+        # save
+        save_output(fg_iq[0], corrected_iq, 'file_loc', 'Q')
+
+        # insert into filestore
+        uid = str(uuid4())
+        fs_res = fsc.insert_resource('CHI', 'file_loc')
+        fsc.insert_datum(fs_res, uid)
+        yield uid, data_names, data_keys
+
+
 
 # def calibrate_detector(hdr, **kwargs):
 #     data_keys = {'poni': dict(
