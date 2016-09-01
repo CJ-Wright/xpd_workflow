@@ -114,8 +114,11 @@ def run_detector_calibration(run_start_header):
                                             **md)
 
     # TODO: maybe use the dictionary itself?
-    data_keys = {'poni': dict(source='pyFAI-calib', external='FILESTORE:',
-                              dtype='dict')}
+    data_keys = {'poni': dict(
+        source='pyFAI-calib',
+        external='FILESTORE:',
+        dtype='dict'
+    )}
     data_hdr = dict(analysis_header=a_hdr_uid, data_keys=data_keys,
                     time=time.time(), uid=str(uuid4()))
 
@@ -138,6 +141,7 @@ def spoof_detector_calibration(run_start_header, poni_file):
 
     Parameters
     ----------
+    run_start_header:
     poni_file
 
     Returns
@@ -153,9 +157,8 @@ def spoof_detector_calibration(run_start_header, poni_file):
     # add entry to analysisstore
     # TODO: make a function to do all this formatting
     md = dict(
-        run_header_uid=run_start_header['descriptor']['run_start_header'][
-            'uid'],
-        seq_num=run_start_header['seq_num]'],
+        run_header_uid=run_start_header['start']['uid'],
+        seq_num=run_start_header['seq_num'],
         event_uid=run_start_header['uid'],
         function='run_calibration',
         )
@@ -179,6 +182,7 @@ def spoof_detector_calibration(run_start_header, poni_file):
                               time=time.time(), exit_status='success')
     geo = fsc.retrieve(file_dict['poni'])
     return geo
+
 
 # 1. associate with a calibration
 def get_calibration(event, cal_hdr_idx=-1, cal_file=None, analysis_hdr_idx=-1):
@@ -258,7 +262,6 @@ def subs_dark(event, dark_hdr_idx=-1, img_key='pe1_image'):
 
 
 # 2b. - 5. process to I(Q)
-
 def single_mask_integration(img, geo,
                             alpha=2.5,
                             pol=.95,
@@ -280,7 +283,7 @@ def single_mask_integration(img, geo,
         The allowed standard deviation multiplier, defaults to 2.5
         `alpha * std - mean < x < alpha * std + mean` will remain
     pol: float, optional
-        The polarization correction, defaults to .95, if None no correctin will
+        The polarization correction, defaults to .95, if None no correction will
         be applied
     lower_thresh: float, optional
         Threshold for a lower threshold mask, defaults to 0.0, if None no lower
@@ -313,11 +316,11 @@ def single_mask_integration(img, geo,
 
     r = geo.rArray(img.shape)
     pixel_size = [getattr(geo, a) for a in ['pixel1', 'pixel2']]
+    # XXX: THIS IS ONLY VALID FOR PERPENDICULAR DETECTORS!
     rres = np.hypot(*pixel_size)
     rbins = np.arange(np.min(r) - rres / 2., np.max(r) + rres / 2., rres)
 
     # Pre masking data
-
     if tmsk is None:
         tmsk = np.ones(img.shape, dtype=int).astype(bool)
     if margin:
