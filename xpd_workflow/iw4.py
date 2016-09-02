@@ -71,7 +71,9 @@ def process_to_pdf(hdr, bg_hdr_idx=-1):
                                         background_subtraction,
                                         'background_subtraction')
     # 8., 9. optimize PDF params, get PDF
-    pdf = get_optimized_pdf_params(hdr)
+    pdf = analysis_run_engine(corrected_iqs,
+                              optimize_pdf_parameters,
+                              'optimize_pdf_parameters')
     # 10. Profit
     return pdf
 
