@@ -36,44 +36,46 @@ def get_analysis_events(hdr, fill=False):
         yield event
 
 
+def calibrate(hdr):
+    # 1. get energy calibration
+    # 2. run detector calibration
+    pass
+
+
 def process_to_iq(hdr):
     # 1. get a detector calibration
-    geo = get_from_analysisstore(hdr,
-                                 function_name='run_calibration',
-                                 run_function=calibrate_detector,
-                                 data_names='poni',
-                                 uid_name='detector_calibration_uid')
-    imgs = analysis_run_engine(hdr, subs_dark, 'subs_dark')
+    cal_hdrs = db(is_detector_calibration=True, detector_calibration_uid=hdr['detector_calibration_uid'])
+    cal_hdr = cal_hdrs[cal_hdr_idx]
+    cal_geo_hdr = find_an_hdr(cal_hdr['uid'], 'calibrate detector')
+    if not cal_geo_hdr:
+        cal_geo_hdr = calibrate(cal_hdr)
+    # 2. dark subtraction
+    imgs = analysis_run_engine(hdr, subs_dark)
     # 3. polarization correction
-    corrected_imgs = analysis_run_engine([imgs, geo], polarization_correction,
-                                         'polarization_correction')
+    corrected_imgs = analysis_run_engine([imgs, cal_geo_hdr], polarization_correction)
     # 4. mask
-    masks = analysis_run_engine([corrected_imgs, geo], mask_img, 'mask_img')
+    masks = analysis_run_engine([corrected_imgs, cal_geo_hdr], mask_img)
     # 5. integrate
-    iqs = analysis_run_engine([imgs, masks, geo], integrate, 'integrate')
+    iqs = analysis_run_engine([imgs, masks, cal_geo_hdr], integrate)
     return iqs
 
 
 def process_to_pdf(hdr, bg_hdr_idx=-1):
-    iqs = process_to_iq()
+    iqs = process_to_iq(hdr)
     bg_hdrs = db(is_background=True, background_uid=hdr['background_uid'])
     bg_hdr = bg_hdrs[bg_hdr_idx]
-    bg_iq = find_an_hdr(bg_hdr['uid'])
-    if not bg_iq:
-        process_to_iq(bg_hdr)
+    bg_iq_hdr = find_an_hdr(bg_hdr['uid'], 'integrate')
+    if not bg_iq_hdr:
+        bg_iq_hdr = process_to_iq(bg_hdr)
 
     # 6a. associate background
-    associated_bg_hdr = analysis_run_engine([hdr, iqs, bg_hdr, bg_iq],
-                                            associate_background,
-                                            'associate_background')
+    associated_bg_hdr = analysis_run_engine([hdr, iqs, bg_hdr, bg_iq_hdr],
+                                            associate_background)
     # 7. subtract background
     corrected_iqs = analysis_run_engine(associated_bg_hdr,
-                                        background_subtraction,
-                                        'background_subtraction')
+                                        background_subtraction)
     # 8., 9. optimize PDF params, get PDF
-    pdf = analysis_run_engine(corrected_iqs,
-                              optimize_pdf_parameters,
-                              'optimize_pdf_parameters')
+    pdf = analysis_run_engine(corrected_iqs, optimize_pdf_parameters)
     # 10. Profit
     return pdf
 
@@ -84,10 +86,10 @@ def find_an_hdr(uid, function_name):
     while True:
         for uid in uids:
             uids = conn.find_analysis_header()
-    pass
+    return hdrs
 
 
-def analysis_run_engine(hdrs, run_function, function_name, md=None, **kwargs):
+def analysis_run_engine(hdrs, run_function, md=None, subs=None, **kwargs):
     """
     Properly run an analysis function on a group of headers while recording
     the data into analysisstore
@@ -98,10 +100,14 @@ def analysis_run_engine(hdrs, run_function, function_name, md=None, **kwargs):
         The headers or header to be analyzed, note that the headers are each
         used in the analysis, if you wish to run multiple headers through a
         pipeline you must
-    run_function
-    function_name
-    md
-    kwargs
+    run_function: generator
+        This generator processes each event in the headers, it returns the
+         filestore resource uids as a list of strings, the data names as a
+         list of strings and the data keys as a dict
+    md: dict
+        Metadata to be added to the analysis header
+    kwargs: dict
+        Additional arguments passed directly to the run_function
 
     Returns
     -------
@@ -111,7 +117,7 @@ def analysis_run_engine(hdrs, run_function, function_name, md=None, **kwargs):
     analysis_hdr_uid = conn.insert_analysis_header(
         uid=str(uuid4()),
         time=time.time(),
-        provenance={'function_name': function_name,
+        provenance={'function_name': run_function.__name__,
                     'hdr_uids': [hdr['uid'] for hdr in hdrs]},
         **md)
 
@@ -146,7 +152,7 @@ def analysis_run_engine(hdrs, run_function, function_name, md=None, **kwargs):
 
 
 def sample_analysis_function(hdr, **kwargs):
-    # extract data from analysisstore or databroker
+    # extract data from databroker
     data_keys = {'sum': dict(
         source='pyFAI-calib',
         external='FILESTORE:',
@@ -161,13 +167,13 @@ def sample_analysis_function(hdr, **kwargs):
 
 
 def subs_dark(hdr, dark_hdr_idx=-1, dark_event_idx=-1):
-    data_keys = {'img': dict(
+    data_names = ['img']
+    data_keys = {k: dict(
         source='subs_dark',
         external='FILESTORE:',
         dtype='array'
-    )}
+    ) for k in data_names}
 
-    data_names = ['img']
     dark_hdr = db(is_dark_img=True, dark_uid=hdr['dark_uid'])[dark_hdr_idx]
     dark_events = get_events(dark_hdr, fill=True)
     dark_img = islice(dark_events, dark_event_idx)
@@ -188,13 +194,13 @@ def subs_dark(hdr, dark_hdr_idx=-1, dark_event_idx=-1):
 def mask_img(hdr, cal_hdr,
              alpha=2.5, lower_thresh=0.0, upper_thresh=None,
              margin=30., tmsk=None):
-    data_keys = {'msk': dict(
+    data_names = ['msk']
+    data_keys = {k: dict(
         source='auto_mask',
         external='FILESTORE:',
         dtype='array'
-    )}
+    ) for k in data_names}
 
-    data_names = ['msk']
     geo = next(get_analysis_events(cal_hdr, fill=True))['data']['poni']
     for event in get_analysis_events(hdr, fill=True):
         img = event['data']['img']
@@ -224,13 +230,13 @@ def mask_img(hdr, cal_hdr,
 
 
 def polarization_correction(hdr, cal_hdr, polarization=.99):
-    data_keys = {'img': dict(
+    data_names = ['img']
+    data_keys = {k: dict(
         source='pyFAI-polarization',
         external='FILESTORE:',
         dtype='array'
-    )}
+    ) in data_names}
 
-    data_names = ['img']
     geo = next(get_analysis_events(cal_hdr, fill=True))['data']['poni']
     for event in get_analysis_events(hdr, fill=True):
         img = event['data']['img']
@@ -248,13 +254,14 @@ def polarization_correction(hdr, cal_hdr, polarization=.99):
 def integrate(img_hdr, mask_hdr, cal_hdr, stats='mean', npt=1500):
     if not isinstance(stats, list):
         stats = [stats]
-    for stat in stats:
-        data_keys = {'iq_{}'.format(stat): dict(
-            source='cjw-integrate',
-            external='FILESTORE:',
-            dtype='array'
-        )}
-        data_names = ['iq_{}'.format(stat)]
+    data_names = ['iq_{}'.format(stat) for stat in stats]
+
+    data_keys = {dn: dict(
+        source='cjw-integrate',
+        external='FILESTORE:',
+        dtype='array'
+    ) for dn in data_names}
+
     geo = next(get_analysis_events(cal_hdr, fill=True))['data']['poni']
     for img_event, mask_event in zip(get_analysis_events(img_hdr, fill=True),
                                      get_analysis_events(mask_hdr, fill=True)):
