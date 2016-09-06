@@ -36,48 +36,89 @@ def get_analysis_events(hdr, fill=False):
         yield event
 
 
-def calibrate(hdr):
+def calibrate_detector(hdr):
     # 1. get energy calibration
     # 2. run detector calibration
     pass
 
 
-def process_to_iq(hdr):
-    # 1. get a detector calibration
-    cal_hdrs = db(is_detector_calibration=True, detector_calibration_uid=hdr['detector_calibration_uid'])
-    cal_hdr = cal_hdrs[cal_hdr_idx]
-    cal_geo_hdr = find_an_hdr(cal_hdr['uid'], 'calibrate detector')
-    if not cal_geo_hdr:
-        cal_geo_hdr = calibrate(cal_hdr)
-    # 2. dark subtraction
-    imgs = analysis_run_engine(hdr, subs_dark)
-    # 3. polarization correction
-    corrected_imgs = analysis_run_engine([imgs, cal_geo_hdr], polarization_correction)
-    # 4. mask
-    masks = analysis_run_engine([corrected_imgs, cal_geo_hdr], mask_img)
-    # 5. integrate
-    iqs = analysis_run_engine([imgs, masks, cal_geo_hdr], integrate)
-    return iqs
+def process_to_iq(hdrs, det_cal_hdr_idx=-1):
+    """
+    Process raw data from MDS to I(Q) data
+
+    Parameters
+    ----------
+    hdrs: header or list of headers
+        The data to be processed
+    det_cal_hdr_idx: int, optional
+        Calibration index to use if there are multiple calibrations
+        Defaults to the latest calibration
+
+    Yields
+    -------
+    iqs: analysis header
+        The headers associated with the I(Q) data
+    """
+    if not isinstance(hdrs, list):
+        hdrs = [hdrs]
+    for hdr in hdrs:
+        # 1. get a detector calibration
+        cal_hdrs = db(is_detector_calibration=True,
+                      detector_calibration_uid=hdr['detector_calibration_uid'])
+        cal_hdr = cal_hdrs[det_cal_hdr_idx]
+        cal_geo_hdr = find_an_hdr(cal_hdr['uid'], 'calibrate_detector')
+        if not cal_geo_hdr:
+            cal_geo_hdr = calibrate_detector(cal_hdr)
+        # 2. dark subtraction
+        imgs = analysis_run_engine(hdr, subs_dark)
+        # 3. polarization correction
+        corrected_imgs = analysis_run_engine([imgs, cal_geo_hdr], polarization_correction)
+        # 4. mask
+        masks = analysis_run_engine([corrected_imgs, cal_geo_hdr], mask_img)
+        # 5. integrate
+        iqs = analysis_run_engine([imgs, masks, cal_geo_hdr], integrate)
+        yield iqs
 
 
-def process_to_pdf(hdr, bg_hdr_idx=-1):
-    iqs = process_to_iq(hdr)
-    bg_hdrs = db(is_background=True, background_uid=hdr['background_uid'])
-    bg_hdr = bg_hdrs[bg_hdr_idx]
-    bg_iq_hdr = find_an_hdr(bg_hdr['uid'], 'integrate')
-    if not bg_iq_hdr:
-        bg_iq_hdr = process_to_iq(bg_hdr)
+def process_to_pdf(hdrs, bg_hdr_idx=-1, det_cal_hdr_idx=-1):
+    """
+    Process a raw MDS header to the PDF
 
-    # 6a. associate background
-    associated_bg_hdr = analysis_run_engine([hdr, iqs, bg_hdr, bg_iq_hdr],
-                                            associate_background)
-    # 7. subtract background
-    corrected_iqs = analysis_run_engine(associated_bg_hdr,
-                                        background_subtraction)
-    # 8., 9. optimize PDF params, get PDF
-    pdf = analysis_run_engine(corrected_iqs, optimize_pdf_parameters)
-    # 10. Profit
-    return pdf
+    Parameters
+    ----------
+    hdrs: header or list of headers
+        The data to be processed
+    bg_hdr_idx: int, optional
+        Background index to use if there are multiple background headers
+    det_cal_hdr_idx: int, optional
+        Calibration index to use if there are multiple calibrations
+        Defaults to the latest calibration
+
+    Yields
+    -------
+    pdf: analysis header
+        The headers associated with the PDF data
+    """
+    if not isinstance(hdrs, list):
+        hdrs = [hdrs]
+    for hdr in hdrs:
+        iqs = process_to_iq(hdr, det_cal_hdr_idx=det_cal_hdr_idx)
+        bg_hdrs = db(is_background=True, background_uid=hdr['background_uid'])
+        bg_hdr = bg_hdrs[bg_hdr_idx]
+        bg_iq_hdr = find_an_hdr(bg_hdr['uid'], 'integrate')
+        if not bg_iq_hdr:
+            bg_iq_hdr = process_to_iq(bg_hdr)
+
+        # 6a. associate background
+        associated_bg_hdr = analysis_run_engine([hdr, iqs, bg_hdr, bg_iq_hdr],
+                                                associate_background)
+        # 7. subtract background
+        corrected_iqs = analysis_run_engine(associated_bg_hdr,
+                                            background_subtraction)
+        # 8., 9. optimize PDF params, get PDF
+        pdf = analysis_run_engine(corrected_iqs, optimize_pdf_parameters)
+        # 10. Profit
+        yield pdf
 
 
 def find_an_hdr(uid, function_name):
@@ -89,7 +130,8 @@ def find_an_hdr(uid, function_name):
     return hdrs
 
 
-def analysis_run_engine(hdrs, run_function, md=None, subs=None, **kwargs):
+def analysis_run_engine(hdrs, run_function, md=None, subscription=None,
+                        **kwargs):
     """
     Properly run an analysis function on a group of headers while recording
     the data into analysisstore
@@ -106,6 +148,8 @@ def analysis_run_engine(hdrs, run_function, md=None, subs=None, **kwargs):
          list of strings and the data keys as a dict
     md: dict
         Metadata to be added to the analysis header
+    subscription: function or list of functions
+        Run after processing the event, eg graphing output data
     kwargs: dict
         Additional arguments passed directly to the run_function
 
@@ -122,17 +166,16 @@ def analysis_run_engine(hdrs, run_function, md=None, subs=None, **kwargs):
         **md)
 
     data_hdr = None
-    exit_status = 'failure'
+    exit_md = {'exit_status':'failure'}
     # run the analysis function
     try:
         rf = run_function(*hdrs, **kwargs)
-        for i, res, data_names, data_keys in enumerate(rf):
+        for i, res, data_names, data_keys, data in enumerate(rf):
             if not data_hdr:
                 data_hdr = dict(analysis_header=analysis_hdr_uid,
                                 data_keys=data_keys,
                                 time=time.time(), uid=str(uuid4()))
                 data_hdr_uid = conn.insert_data_reference_header(**data_hdr)
-
             conn.insert_data_reference(
                 data_reference_header=data_hdr_uid,
                 uid=str(uuid4()),
@@ -140,14 +183,19 @@ def analysis_run_engine(hdrs, run_function, md=None, subs=None, **kwargs):
                 data={k: v for k, v in zip(data_names, res)},
                 timestamps={},
                 seq_num=i)
-        exit_status = 'success'
-    except:
+            if not isinstance(subscription, list):
+                subscription = [subscription]
+            for subs in subscription:
+                subs(data)
+        exit_md['exit_status'] = 'success'
+    except Exception as e:
         # Analysis failed!
-        exit_status = 'failure'
+        exit_md['exit_status'] = 'failure'
+        exit_md['exception'] = e
     finally:
         conn.insert_analysis_tail(analysis_header=analysis_hdr_uid,
                                   uid=str(uuid4()),
-                                  time=time.time(), exit_status=exit_status)
+                                  time=time.time(), **exit_md)
         return analysis_hdr_uid
 
 
@@ -188,7 +236,7 @@ def subs_dark(hdr, dark_hdr_idx=-1, dark_event_idx=-1):
         uid = str(uuid4())
         fs_res = fsc.insert_resource('TIFF', 'file_loc')
         fsc.insert_datum(fs_res, uid)
-        yield uid, data_names, data_keys
+        yield uid, data_names, data_keys, img
 
 
 def mask_img(hdr, cal_hdr,
@@ -226,7 +274,7 @@ def mask_img(hdr, cal_hdr,
         uid = str(uuid4())
         fs_res = fsc.insert_resource('npy', 'file_loc')
         fsc.insert_datum(fs_res, uid)
-        yield uid, data_names, data_keys
+        yield uid, data_names, data_keys, tmsk
 
 
 def polarization_correction(hdr, cal_hdr, polarization=.99):
@@ -248,7 +296,7 @@ def polarization_correction(hdr, cal_hdr, polarization=.99):
         uid = str(uuid4())
         fs_res = fsc.insert_resource('TIFF', 'file_loc')
         fsc.insert_datum(fs_res, uid)
-        yield uid, data_names, data_keys
+        yield uid, data_names, data_keys, img
 
 
 def integrate(img_hdr, mask_hdr, cal_hdr, stats='mean', npt=1500):
@@ -269,9 +317,10 @@ def integrate(img_hdr, mask_hdr, cal_hdr, stats='mean', npt=1500):
         img = img_event['data']['img'][mask]
         q = geo.qArray(img.shape)[mask] / 10  # pyFAI works in nm^1
         uids = []
+        data = []
         for stat in stats:
             iq, q, _ = sts.binned_statistic(q, img, statistic=stat, bins=npt)
-
+            data.append((q, iq))
             # save
             save_output(q, iq, 'save_loc', 'Q')
 
@@ -280,7 +329,7 @@ def integrate(img_hdr, mask_hdr, cal_hdr, stats='mean', npt=1500):
             fs_res = fsc.insert_resource('CHI', 'file_loc')
             fsc.insert_datum(fs_res, uid)
             uids.append(uid)
-        yield uids, data_names, data_keys
+        yield uids, data_names, data_keys, data
 
 
 def associate_background(hdr, iqs, bg_hdr, bg_iq, match_key=None):
@@ -332,7 +381,7 @@ def background_subtraction(hdr, bg_scale=1):
         uid = str(uuid4())
         fs_res = fsc.insert_resource('CHI', 'file_loc')
         fsc.insert_datum(fs_res, uid)
-        yield uid, data_names, data_keys
+        yield uid, data_names, data_keys, corrected_iq
 
 
 
