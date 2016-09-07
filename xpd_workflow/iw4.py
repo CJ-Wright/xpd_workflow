@@ -11,6 +11,7 @@ import numpy as np
 from tifffile.tifffile import imsave
 import scipy.stats as sts
 from skbeam.io.save_powder_output import save_output
+import pyFAI
 
 conf = dict(host='xf28id-ca1.cs.nsls2.local', port=7767)
 conn = AnalysisClient(conf)
@@ -36,10 +37,36 @@ def get_analysis_events(hdr, fill=False):
         yield event
 
 
-def calibrate_detector(hdr):
+def calibrate_detector(hdr, nrg_cal_hdr_idx=-1):
     # 1. get energy calibration
+    nrg_hdrs = db(is_energy_calibration=True,
+                  energy_calibration_uid=hdr['energy_calibration_uid'])
+    nrg_hdr = nrg_hdrs[nrg_cal_hdr_idx]
+    nrg_cal_hdr = find_an_hdr(nrg_hdr['uid'], 'calibrate_energy')
+    if not nrg_cal_hdr:
+        nrg_cal_hdr = calibrate_energy(nrg_hdr)
     # 2. run detector calibration
+    calibration = analysis_run_engine([hdr, nrg_cal_hdr], detector_calibrate)
     pass
+
+
+def spoof_detector_calibration(cal_hdr, poni_file):
+    calibration = analysis_run_engine([cal_hdr], spoof_det_cal, poni_file=poni_file)
+
+
+def spoof_det_cal(hdr, poni_file):
+    data_names = ['poni']
+    data_keys = {k: dict(
+        source='pyFAI-calib spoof',
+        external='FILESTORE:',
+        dtype='dict'
+    ) for k in data_names}
+
+    for event in get_analysis_events(hdr):
+        uid = str(uuid4())
+        fs_res = fsc.insert_resource('poni', 'poni_file')
+        fsc.insert_datum(fs_res, uid)
+        yield uid, data_names, data_keys, pyFAI.load(poni_file)
 
 
 def process_to_iq(hdrs, det_cal_hdr_idx=-1):
@@ -408,18 +435,6 @@ def background_subtraction(hdr, bg_scale=1):
 #                                  uid_name='dark_img_uid',
 #                                  data_names='img',
 #                                  fs_override=True)
-#
-#
-# def subtract_dark(hdr, dark_hdr, img_name='pe1_img', dark_event_idx=-1):
-#     dark_events = get_events(dark_hdr, fill=True)
-#     dark_img = islice(dark_events, dark_event_idx)
-#     events = get_events(hdr, fill=True)
-#     imgs = [event['data'][img_name] - dark_img for event in events]
-#     return imgs
-#
-#
-# def calibrate_energy():
-#     pass
 #
 
 # def get_from_analysisstore(hdr,
