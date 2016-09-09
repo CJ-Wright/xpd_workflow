@@ -51,7 +51,8 @@ def calibrate_detector(hdr, nrg_cal_hdr_idx=-1):
 
 
 def spoof_detector_calibration(cal_hdr, poni_file):
-    calibration = analysis_run_engine([cal_hdr], spoof_det_cal, poni_file=poni_file)
+    calibration = analysis_run_engine([cal_hdr], spoof_det_cal,
+                                      poni_file=poni_file)
 
 
 def spoof_det_cal(hdr, poni_file):
@@ -99,7 +100,8 @@ def process_to_iq(hdrs, det_cal_hdr_idx=-1):
         # 2. dark subtraction
         imgs = analysis_run_engine(hdr, subs_dark)
         # 3. polarization correction
-        corrected_imgs = analysis_run_engine([imgs, cal_geo_hdr], polarization_correction)
+        corrected_imgs = analysis_run_engine([imgs, cal_geo_hdr],
+                                             polarization_correction)
         # 4. mask
         masks = analysis_run_engine([corrected_imgs, cal_geo_hdr], mask_img)
         # 5. integrate
@@ -193,7 +195,7 @@ def analysis_run_engine(hdrs, run_function, md=None, subscription=None,
         **md)
 
     data_hdr = None
-    exit_md = {'exit_status':'failure'}
+    exit_md = {'exit_status': 'failure'}
     # run the analysis function
     try:
         rf = run_function(*hdrs, **kwargs)
@@ -409,8 +411,6 @@ def background_subtraction(hdr, bg_scale=1):
         fs_res = fsc.insert_resource('CHI', 'file_loc')
         fsc.insert_datum(fs_res, uid)
         yield uid, data_names, data_keys, corrected_iq
-
-
 
 # def calibrate_detector(hdr, **kwargs):
 #     data_keys = {'poni': dict(
